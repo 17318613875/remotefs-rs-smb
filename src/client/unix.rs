@@ -3,12 +3,13 @@
 //! UNIX implementation of Smb fs client
 
 // -- exports
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use libc::mode_t;
 pub use pavao::{SmbClient, SmbCredentials, SmbEncryptionLevel, SmbOptions, SmbShareMode};
 use pavao::{SmbDirentType, SmbMode, SmbOpenOptions};
+use remotefs::fs::stream::{ReadAndSeek, WriteAndSeek};
 use remotefs::fs::{File, Metadata, ReadStream, UnixPex, Welcome, WriteStream};
 use remotefs::{RemoteError, RemoteErrorType, RemoteFs, RemoteResult};
 
@@ -266,18 +267,86 @@ impl RemoteFs for SmbFs {
         io::copy(&mut file, &mut dest).map_err(|e| RemoteError::new_ex(RemoteErrorType::IoError, e))
     }
 
-    fn append(&mut self, _path: &Path, _metadata: &Metadata) -> RemoteResult<WriteStream> {
-        Err(RemoteError::new(RemoteErrorType::UnsupportedFeature))
+    fn append(&mut self, path: &Path, metadata: &Metadata) -> RemoteResult<WriteStream> {
+        self.check_connection()?;
+        let path_abs = self.get_uri(path);
+        debug!("creating {} for reading...", path_abs);
+
+        let writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path_abs)
+            .map_err(|e| RemoteError::new_ex(RemoteErrorType::IoError, e))
+            .map(|file| {
+                WriteStream::from(Box::new(FileStream::from(file)) as Box<dyn WriteAndSeek>)
+            })?;
+
+        self.setstat(path, metadata.clone())?;
+
+        Ok(writer)
     }
 
-    fn create(&mut self, _path: &Path, _metadata: &Metadata) -> RemoteResult<WriteStream> {
-        Err(RemoteError::new(RemoteErrorType::UnsupportedFeature))
+    fn create(&mut self, path: &Path, metadata: &Metadata) -> RemoteResult<WriteStream> {
+        self.check_connection()?;
+        let path_abs = self.get_uri(path);
+        debug!("creating {} for reading...", path_abs);
+
+        let writer = std::fs::File::create(path_abs)
+            .map_err(|e| RemoteError::new_ex(RemoteErrorType::IoError, e))
+            .map(|file| {
+                WriteStream::from(Box::new(FileStream::from(file)) as Box<dyn WriteAndSeek>)
+            })?;
+
+        self.setstat(path, metadata.clone())?;
+
+        Ok(writer)
     }
 
-    fn open(&mut self, _path: &Path) -> RemoteResult<ReadStream> {
-        Err(RemoteError::new(RemoteErrorType::UnsupportedFeature))
+    fn open(&mut self, path: &Path) -> RemoteResult<ReadStream> {
+        self.check_connection()?;
+        let path = self.get_uri(path);
+        debug!("opening file {} for reading...", path);
+
+        std::fs::File::open(path)
+            .map_err(|e| RemoteError::new_ex(RemoteErrorType::IoError, e))
+            .map(|file| ReadStream::from(Box::new(FileStream::from(file)) as Box<dyn ReadAndSeek>))
     }
 }
+
+pub struct FileStream {
+    file: std::fs::File,
+}
+
+impl From<std::fs::File> for FileStream {
+    fn from(file: std::fs::File) -> Self {
+        Self { file }
+    }
+}
+
+impl Read for FileStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Seek for FileStream {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+impl ReadAndSeek for FileStream {}
+
+impl Write for FileStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl WriteAndSeek for FileStream {}
 
 #[cfg(test)]
 mod test {
