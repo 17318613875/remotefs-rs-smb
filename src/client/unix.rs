@@ -289,6 +289,11 @@ impl RemoteFs for SmbFs {
         self.check_connection()?;
         let path_abs = self.get_uri(path);
         debug!("creating {} for reading...", path_abs);
+        // 确保目录存在
+        if let Some(parent) = std::path::Path::new(&path_abs).parent() {
+            let _ = std::fs::create_dir_all(parent)
+                .map_err(|e| RemoteError::new_ex(RemoteErrorType::IoError, e));
+        }
 
         let writer = std::fs::File::create(path_abs)
             .map_err(|e| RemoteError::new_ex(RemoteErrorType::IoError, e))
